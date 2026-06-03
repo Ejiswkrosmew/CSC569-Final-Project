@@ -32,7 +32,7 @@ class ChunkHB:
     op_type: int
 
     def to_bytes(self):
-        return struct.pack(formats[self.format_type], self.format_type, self.log_entry, self.chunk_handle, self.op_type)
+        return struct.pack(formats[self.format_type], self.format_type, self.src_port, self.log_entry, self.chunk_handle, self.op_type)
 
 # Request to create a new file from the client to the master
 @dataclass
