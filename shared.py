@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 formats = {
     0: "!III4096s",
-    1: "!I?II",
+    1: "!II?II",
     2: "!I50sI",
     3: "!II",
     4: "!I50sI",
@@ -26,6 +26,7 @@ class ChunkServRequest:
 @dataclass
 class ChunkHB:
     format_type: int = 1
+    src_port: int
     log_entry: bool
     chunk_handle: int
     op_type: int
