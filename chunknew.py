@@ -194,8 +194,6 @@ def main():
     HOST = "0.0.0.0"
     PORT = 5000
 
-
-
     if rank == 0:
         print(f"I am master")
 
