@@ -15,7 +15,7 @@ formats = {
 @dataclass
 class ChunkServRequest:
     format_type: int = 0
-    type: int
+    req_type: int
     chunk_handle: int
     data: bytes[4096]
 
