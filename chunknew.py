@@ -129,7 +129,7 @@ def hb_loop(master_sock, port):
         with master_lock:
             master_sock.sendall(hb.to_bytes())
 
-def listen_for_master_chunkreq(master_sock, chunks, conn):
+def listen_for_master_chunkreq(master_sock, chunks):
     while True:
         try:
             req = recv_decode(master_sock)
@@ -186,7 +186,49 @@ def listen_for_master_chunkreq(master_sock, chunks, conn):
             break
 
 
-def main():
+def replicaHB(comm):
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+    while True:
+        time.sleep(1)
+        print("rank0 sending hbs")
+        for replica in range(1, size):
+            comm.send(
+                    {
+                        "hb": "true"
+                    },
+                    dest=replica,
+                    tag=200
+                    )
+
+def replica_list_hb(comm):
+    rank = comm.Get_rank()
+    while True:
+
+        timeout = 5.0 #primary crash detection timeout
+        start = time.time()
+
+        req = comm.irecv(source=0, tag=200)
+
+        while True:
+            msg = req.test()
+
+            if msg[0]:
+                print(f"heartbeat from 0 {msg}")
+                break
+            
+            if time.time() - start > timeout:
+                print("rank zero has gone down")
+                #TODO:
+                #write entire chunkstore to file <chunkdump-<portnumber>>
+                #exit
+                break
+
+
+            time.sleep(0.01)
+
+
+def main(): #TODO: arg order: chunkserverport#, masterport#, chunkdumpfilepath  
     comm = MPI.COMM_WORLD
     #print(f"Hello from rank {comm.Get_rank()} of {comm.Get_size()}")
     rank = comm.Get_rank()
@@ -196,6 +238,11 @@ def main():
 
     if rank == 0:
         print(f"I am master")
+        
+        #TODO:
+        #read from chunkdump file on disk (./chunkdump-<portnumber>)
+        #place into chunkstore
+        #destory file
 
         #connect to master
         master_sock = socket.socket(
@@ -229,9 +276,19 @@ def main():
         threading.Thread(
                 #listen for requests from master
                 target=listen_for_master_chunkreq,
-                args=(master_sock, chunk_store, comm),
+                args=(master_sock, chunk_store),
                 daemon=True
         ).start()
+
+
+        threading.Thread(
+            #send HB to replicas
+            target=replicaHB,
+            args=(comm,),
+            daemon=True
+        ).start()
+
+
 
         #listen for connections from the client and handle
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as serversocket:
@@ -242,6 +299,8 @@ def main():
 
             print(f"Rank 0 listening on {HOST}:{PORT}")
 
+
+            exit
             while True:
                 clientsocket, address = serversocket.accept()
 
@@ -254,6 +313,13 @@ def main():
 
     elif rank in [1, 2, 3]:
         print(f"I am replica rank {rank}")
+
+        threading.Thread(
+            target=replica_list_hb,
+            args=(comm,),
+            daemon=True
+        ).start()
+
 
         while True:
             msg = comm.recv(source=0, tag=100)
