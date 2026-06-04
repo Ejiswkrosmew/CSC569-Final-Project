@@ -20,7 +20,7 @@ class ChunkServRequest:
     data: bytes = b""
 
     def to_bytes(self):
-        return struct.pack(formats[self.format_type], self.format_type, self.type, self.chunk_handle, self.data)
+        return struct.pack(formats[self.format_type], self.format_type, self.req_type, self.chunk_handle, self.data)
 
 # HB for chunkservers to send to the master
 @dataclass
