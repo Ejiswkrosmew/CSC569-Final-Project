@@ -57,7 +57,7 @@ class StatusReply:
 @dataclass
 class ChunkLocRequest:
     format_type: int = 4
-    filepath: bytes = 0
+    filepath: bytes = b""
     chunk_num: int = 0
 
     def to_bytes(self):
