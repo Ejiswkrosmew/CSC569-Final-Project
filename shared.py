@@ -15,9 +15,9 @@ formats = {
 @dataclass
 class ChunkServRequest:
     format_type: int = 0
-    req_type: int
-    chunk_handle: int
-    data: bytes[4096]
+    req_type: int = 0
+    chunk_handle: int = 0
+    data: bytes = b""
 
     def to_bytes(self):
         return struct.pack(formats[self.format_type], self.format_type, self.type, self.chunk_handle, self.data)
@@ -26,10 +26,10 @@ class ChunkServRequest:
 @dataclass
 class ChunkHB:
     format_type: int = 1
-    src_port: int
-    log_entry: bool
-    chunk_handle: int
-    op_type: int
+    src_port: int = 0
+    log_entry: bool = False
+    chunk_handle: int = 0
+    op_type: int = 0
 
     def to_bytes(self):
         return struct.pack(formats[self.format_type], self.format_type, self.src_port, self.log_entry, self.chunk_handle, self.op_type)
@@ -38,8 +38,8 @@ class ChunkHB:
 @dataclass
 class CreateRequest:
     format_type: int = 2
-    filepath: bytes[50]
-    chunks: int
+    filepath: bytes = b""
+    chunks: int = 0
 
     def to_bytes(self):
         return struct.pack(formats[self.format_type], self.format_type, self.filepath, self.chunks)
@@ -48,7 +48,7 @@ class CreateRequest:
 @dataclass
 class StatusReply:
     format_type: int = 3
-    status: int
+    status: int = 0
 
     def to_bytes(self):
         return struct.pack(formats[self.format_type], self.format_type, self.status)
@@ -57,8 +57,8 @@ class StatusReply:
 @dataclass
 class ChunkLocRequest:
     format_type: int = 4
-    filepath: bytes[50]
-    chunk_num: int
+    filepath: bytes = 0
+    chunk_num: int = 0
 
     def to_bytes(self):
         return struct.pack(formats[self.format_type], self.format_type, self.filepath, self.chunk_num)
@@ -67,8 +67,8 @@ class ChunkLocRequest:
 @dataclass
 class ChunkLocReply:
     format_type: int = 5
-    chunk_handle: int
-    replica_port: int
+    chunk_handle: int = 0
+    replica_port: int = 0
 
     def to_bytes(self):
         return struct.pack(formats[self.format_type], self.format_type, self.chunk_handle, self.replica_port)
@@ -77,11 +77,23 @@ class ChunkLocReply:
 @dataclass
 class ChunkRegistration:
     format_type: int = 6
-    port: int
-    chunk_handles: list[int]
+    port: int = 0
+    chunk_handles: list[int] = None
 
     def to_bytes(self):
-        return struct.pack(formats[self.format_type], self.format_type, self.port, *self.chunk_handles)
+        handles = self.chunk_handles or []
+
+        if len(handles) > 10:
+            raise ValueError("chunk_handles can contain at most 10 handles")
+
+        handles = handles + [0] * (10 - len(handles))
+
+        return struct.pack(
+            formats[self.format_type],
+            self.format_type,
+            self.port,
+            *handles
+        )
 
 structs = [
     ChunkServRequest,
@@ -96,4 +108,13 @@ structs = [
 def from_bytes(bytes):
     format_type = struct.unpack("!I", bytes[:4])[0]
     data = struct.unpack(formats[format_type], bytes)
+
+
+    if format_type == 6:
+        return ChunkRegistration(
+            format_type=data[0],
+            port=data[1],
+            chunk_handles=list(data[2:])
+        )
+
     return structs[format_type](*data)
