@@ -6,20 +6,24 @@ Master server
 - chunk handle -> known replica locations
 - chunkserver registry + heartbeat updates sent by chunkservers via network messages (in shared.py)
 
-The master should usually be started first. Chunkservers then register
-themselves with the master and continue sending heartbeat messages.
+The master should be started first. Chunkservers then register
+themselves with the master and continue sending heartbeat messages
 """
+
+
 
 from __future__ import annotations
 
+import subprocess
 import socket
 import struct
+import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 # useful for pathing utils
 
 from typing import Iterable
@@ -41,6 +45,9 @@ ChunkHandle = int
 ChunkServerId = str
 
 CHUNKSERVER_CREATE_CHUNK = 1
+CLIENT_STATUS_OK = 0
+CLIENT_STATUS_ERROR = 1
+CHUNKSERVER_STATUS_OK = 1
 
 
 class NodeType(str, Enum):
@@ -88,6 +95,7 @@ class ChunkServerInfo:
     chunk_handles: set[ChunkHandle] = field(default_factory=set)
     last_heartbeat: float = field(default_factory=time.time)
     is_alive: bool = True
+    recovery_started: bool = False
 
 
 @dataclass
@@ -161,6 +169,7 @@ class MasterMetadataStore:
                 handle for handle in chunk_handles if handle != 0}
             server.last_heartbeat = time.time()
             server.is_alive = True
+            server.recovery_started = False
 
             self._merge_chunk_inventory(server)
             self.append_log(
@@ -183,6 +192,7 @@ class MasterMetadataStore:
                 handle for handle in chunk_handles if handle != 0}
             server.last_heartbeat = time.time()
             server.is_alive = True
+            server.recovery_started = False
             self._merge_chunk_inventory(server)
             self.append_log(
                 event_type="chunkserver_heartbeat",
@@ -210,6 +220,7 @@ class MasterMetadataStore:
             server.port = port
             server.last_heartbeat = time.time()
             server.is_alive = True
+            server.recovery_started = False
             if chunk_handle != 0:
                 server.chunk_handles.add(chunk_handle)
             self._merge_chunk_inventory(server)
@@ -255,14 +266,36 @@ class MasterMetadataStore:
             )
         )
 
-    def mark_dead_chunkservers(self, heartbeat_timeout_seconds: float) -> None:
-        # Mark servers dead if they have not responded recently
+    def mark_dead_chunkservers(
+        self,
+        heartbeat_timeout_seconds: float,
+    ) -> list[ChunkServerInfo]:
+        # Mark servers dead if they have not responded recently.
+        # will be restarted outside here so we don't block liveness checking
 
         cutoff = time.time() - heartbeat_timeout_seconds
+        newly_dead_servers: list[ChunkServerInfo] = []
         with self._metadata_lock:
             for server in self.chunkservers.values():
-                if server.last_heartbeat < cutoff:
+                if server.is_alive and server.last_heartbeat < cutoff:
                     server.is_alive = False
+                    self.append_log(
+                        event_type="chunkserver_marked_dead",
+                        server_id=server.server_id,
+                        detail=f"port={server.port}",
+                    )
+
+                if not server.is_alive and not server.recovery_started:
+                    server.recovery_started = True
+                    newly_dead_servers.append(server)
+
+        return newly_dead_servers
+
+    def clear_recovery_started(self, server_id: ChunkServerId) -> None:
+        with self._metadata_lock:
+            server = self.chunkservers.get(server_id)
+            if server is not None and not server.is_alive:
+                server.recovery_started = False
 
     def create_directory(self, path: str, permissions: str = "rw") -> NamespaceNode:
         # Create a directory entry after validating its parent exists.
@@ -353,9 +386,9 @@ class MasterMetadataStore:
 
     def choose_replica_targets(self) -> list[ChunkServerInfo]:
         """
-        Choose chunkservers for a new chunk.
+        Choose chunkservers for a new chunk
 
-        simple strategy: Pick live servers with the fewest chunks.
+        simple strategy: Pick live servers with the fewest chunks
         """
 
         with self._metadata_lock:
@@ -394,7 +427,7 @@ class MasterMetadataStore:
 
     @staticmethod
     def _new_chunk_handle() -> ChunkHandle:
-        # shared.py uses "I" which is 32-bit unsigned.
+        # shared.py uses "I" which is 32-bit unsigned
         return uuid.uuid4().int & ((1 << 32) - 1)
 
 
@@ -404,8 +437,8 @@ class MasterService:
 
     The master listens on one port. Each incoming connection should send one
     fixed-size struct message from shared.py. The master unpacks the first four
-    bytes to learn the message type, sends to the matching handler, and
-    sends a fixed-size reply if applicable.
+    bytes to get message type, sends to the matching handler, and
+    sends a fixed-size reply if applicable
     """
 
     def __init__(
@@ -505,16 +538,16 @@ class MasterService:
             if path not in self.store.namespace:
                 self.store.create_directory(path)
             self.store.append_log(event_type="directory_created", detail=path)
-            return StatusReply(status=1)
+            return StatusReply(status=CLIENT_STATUS_OK)
 
         node = self.store.create_file(path, request.chunks)
         try:
             self.allocate_file_chunks(node)
         except Exception:
-            return StatusReply(status=0)
+            return StatusReply(status=CLIENT_STATUS_ERROR)
 
         self.store.append_log(event_type="file_created", detail=path)
-        return StatusReply(status=1)
+        return StatusReply(status=CLIENT_STATUS_OK)
 
     def handle_chunkserver_heartbeat(
         self,
@@ -557,7 +590,9 @@ class MasterService:
                     print(
                         f"Master failed to handle message from {address}: {exc}")
                     try:
-                        connection.sendall(StatusReply(status=0).to_bytes())
+                        connection.sendall(
+                            StatusReply(status=CLIENT_STATUS_ERROR).to_bytes()
+                        )
                     except OSError:
                         break
                     if message is None or self.is_client_request(message):
@@ -611,7 +646,7 @@ class MasterService:
         with socket.create_connection((server.host, server.port), timeout=2.0) as sock:
             sock.sendall(request.to_bytes())
             reply = self.read_message(sock)
-        return isinstance(reply, StatusReply) and reply.status == 1
+        return isinstance(reply, StatusReply) and reply.status == CHUNKSERVER_STATUS_OK
 
     def read_message(self, connection: socket.socket) -> object:
         header = self.recv_exact(connection, 4)
@@ -643,8 +678,66 @@ class MasterService:
 
     def liveness_loop(self) -> None:
         while not self._stop_event.is_set():
-            self.store.mark_dead_chunkservers(self.heartbeat_timeout_seconds)
+            dead_servers = self.store.mark_dead_chunkservers(
+                self.heartbeat_timeout_seconds
+            )
+            for server in dead_servers:
+                self.restart_dead_chunkserver(server)
             self._stop_event.wait(self.heartbeat_timeout_seconds / 2)
+
+    def restart_dead_chunkserver(self, server: ChunkServerInfo) -> None:
+        """
+        Restart a dead primary chunkserver from its replica-created dump file.
+
+        chunknew.py expects positional args:
+            chunkserver_port master_port chunkdump_path
+        """
+
+        # path to dump file should be chunkdump-{port} in the same directory as master.py and chunknew.py
+        workspace = Path(__file__).resolve().parent
+        dump_file = workspace / f"chunkdump-{server.port}"
+
+        if not dump_file.exists():
+            print(
+                f"Dead chunkserver {server.server_id} has no dump file at {dump_file}"
+            )
+            self.store.append_log(
+                event_type="chunkserver_recovery_dump_missing",
+                server_id=server.server_id,
+                detail=str(dump_file),
+            )
+            self.store.clear_recovery_started(server.server_id)
+            return
+
+        command = [
+            "mpiexec",
+            "-n",
+            "4",
+            sys.executable,
+            str(workspace / "chunknew.py"),
+            str(server.port),
+            str(self.port),
+            str(dump_file),
+        ]
+
+        try:
+            subprocess.Popen(command, cwd=workspace)
+            print(
+                f"Restarting {server.server_id} on port {server.port} from {dump_file}"
+            )
+            self.store.append_log(
+                event_type="chunkserver_recovery_started",
+                server_id=server.server_id,
+                detail=" ".join(command),
+            )
+        except Exception as exc:
+            print(f"Failed to restart {server.server_id}: {exc}")
+            self.store.append_log(
+                event_type="chunkserver_recovery_failed",
+                server_id=server.server_id,
+                detail=str(exc),
+            )
+            self.store.clear_recovery_started(server.server_id)
 
     @staticmethod
     def server_id_for_port(port: int) -> str:
@@ -660,7 +753,6 @@ class MasterService:
         for part in PurePosixPath(path).parent.parts:
             if part == "/":
                 continue
-            # add with "/" in between -- syntax of PurePosixPath
             current = current / part
             normalized = str(current)
             if normalized not in self.store.namespace:
