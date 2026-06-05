@@ -1,12 +1,16 @@
 from mpi4py import MPI
+import sys
 import socket
 import struct
 import threading
 from shared import ChunkHB, ChunkRegistration, ChunkServRequest, StatusReply, from_bytes, formats
 import time
+import json
+from pathlib import Path
+import os
 
 MASTER_HOST = "127.0.0.1"
-MASTER_PORT = 8888
+MASTER_PORT = int(sys.argv[2])
 chunk_store = {}
 op_log = []
 log_lock = threading.Lock()
@@ -201,7 +205,7 @@ def replicaHB(comm):
                     tag=200
                     )
 
-def replica_list_hb(comm):
+def replica_list_hb(comm, chunks):
     rank = comm.Get_rank()
     while True:
 
@@ -221,7 +225,15 @@ def replica_list_hb(comm):
                 print("rank zero has gone down")
                 #TODO:
                 #write entire chunkstore to file <chunkdump-<portnumber>>
+                filepath = Path(f"chunkdump-{PORT}")
+
+                filepath.unlink(missing_ok=True)
+
+                with open(filepath, 'w') as f:
+                    json.dump(chunks,f)
+
                 #exit
+                os._exit()
                 break
 
 
@@ -234,7 +246,8 @@ def main(): #TODO: arg order: chunkserverport#, masterport#, chunkdumpfilepath
     rank = comm.Get_rank()
     size = comm.Get_size()
     HOST = "0.0.0.0"
-    PORT = 5000
+    PORT = int(sys.argv[1])
+    CHUNKFILE_PATH = sys.argv[3]
 
     if rank == 0:
         print(f"I am master")
@@ -316,7 +329,7 @@ def main(): #TODO: arg order: chunkserverport#, masterport#, chunkdumpfilepath
 
         threading.Thread(
             target=replica_list_hb,
-            args=(comm,),
+            args=(comm,chunk_store),
             daemon=True
         ).start()
 
