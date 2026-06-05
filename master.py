@@ -45,10 +45,8 @@ ChunkHandle = int
 ChunkServerId = str
 
 CHUNKSERVER_CREATE_CHUNK = 1
-CLIENT_STATUS_OK = 0
-CLIENT_STATUS_ERROR = 1
-CHUNKSERVER_STATUS_OK = 1
-
+STATUS_OK = 1
+STATUS_ERROR = 0
 
 class NodeType(str, Enum):
     FILE = "file"
@@ -538,16 +536,16 @@ class MasterService:
             if path not in self.store.namespace:
                 self.store.create_directory(path)
             self.store.append_log(event_type="directory_created", detail=path)
-            return StatusReply(status=CLIENT_STATUS_OK)
+            return StatusReply(status=STATUS_OK)
 
         node = self.store.create_file(path, request.chunks)
         try:
             self.allocate_file_chunks(node)
         except Exception:
-            return StatusReply(status=CLIENT_STATUS_ERROR)
+            return StatusReply(status=STATUS_ERROR)
 
         self.store.append_log(event_type="file_created", detail=path)
-        return StatusReply(status=CLIENT_STATUS_OK)
+        return StatusReply(status=STATUS_OK)
 
     def handle_chunkserver_heartbeat(
         self,
@@ -591,7 +589,7 @@ class MasterService:
                         f"Master failed to handle message from {address}: {exc}")
                     try:
                         connection.sendall(
-                            StatusReply(status=CLIENT_STATUS_ERROR).to_bytes()
+                            StatusReply(status=STATUS_ERROR).to_bytes()
                         )
                     except OSError:
                         break
@@ -646,7 +644,7 @@ class MasterService:
         with socket.create_connection((server.host, server.port), timeout=2.0) as sock:
             sock.sendall(request.to_bytes())
             reply = self.read_message(sock)
-        return isinstance(reply, StatusReply) and reply.status == CHUNKSERVER_STATUS_OK
+        return isinstance(reply, StatusReply) and reply.status == STATUS_OK
 
     def read_message(self, connection: socket.socket) -> object:
         header = self.recv_exact(connection, 4)
