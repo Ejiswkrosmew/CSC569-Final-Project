@@ -34,7 +34,7 @@ Command List:
     close <filepath>                                       Close a file at filepath (free cached metadata)
 
     r                                                      Alias for read
-    read [-o OFF] [-s SIZE] <filepath> <chunk_num>[dst]    Read a file at filepath
+    read [-o OFF] [-s SIZE] <filepath> [dst]               Read a file at filepath
                                                            If dst is specified, ouputs to dst instead of stdout.
                                                            If -o is specified, read from offset
                                                            If -s is specified, read at most s bytes
@@ -54,16 +54,22 @@ Command List:
     quit                                                   Exit cleanly
 """
 
-def recvStruct(socket, format_type):
-	data = b""
-	struct_size = struct.calcsize(formats[format_type])
-	while len(data) < struct.calcsize(formats[format_type]):
+def recvStruct(socket):
+	data = socket.recv(4)
+	format = formats[struct.unpack("!I", data)[0]]
+	struct_size = struct.calcsize(format)
+	while len(data) < struct_size:
 		recv = socket.recv(struct_size - len(data))
 		if not recv:
 			raise ConnectionError(f"Connection closed unexpectedly!")
 		data += recv
 	return from_bytes(data)
 
+def noExitParseArgs(parser, cmd):
+	try:
+		return parser.parse_args(cmd)
+	except argparse.ArgumentError:
+		return None
 
 class Client:
 	def __init__(self, master_addr, chunk_size=CHUNK_SIZE):
@@ -86,7 +92,14 @@ class Client:
 			req = ChunkLocRequest(format_type=4, filepath=filepath.encode(), chunk_num=chunkID)
 			client_socket.sendall(req.to_bytes())
 
-			reply = recvStruct(client_socket, 5)
+			reply = recvStruct(client_socket)
+
+			# If reply is a status reply, return it immediately (request failed)
+			if reply.format_type == 3:
+				self.meta_cache.pop((filepath, chunkID), None)
+				return reply
+			
+			# Otherwise, chunk metadata request was successful
 			self.meta_cache[(filepath, chunkID)] = reply
 		
 		return self.meta_cache[(filepath, chunkID)]
@@ -99,25 +112,61 @@ class Client:
 			req = CreateRequest(format_type=2, filepath=filepath.encode(), chunks=chunks)
 			client_socket.sendall(req.to_bytes())
 
-			reply = recvStruct(client_socket, 3)
+			reply = recvStruct(client_socket)
 			return reply.status
 
 	# Read chunk from chunkserver
 	def readChunk(self, filepath, chunkID):
 		# Get chunk metadata and replica address
 		chunk_meta = self.getChunkMeta(filepath, chunkID)
+		
+		# If a StatusReply was received, chunk could not be read, so return b""
+		if chunk_meta.format_type == 3:
+			return b""
+
 		replica_addr = (LOCAL_HOST, chunk_meta.replica_port)
 
 		# Connect to the replica
 		with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-			client_socket.connect(replica_addr)
+			status = client_socket.connect_ex(replica_addr)
+
+			# If connection failed, chunk metadata needs to be updated
+			while status != 0:
+				self.updateChunkMeta(filepath, chunkID)
+				new = self.getChunkMeta(filepath, chunkID)
+
+				# If nothing actually updated or StatusReply received, return b"" and print that chunk could not be found
+				if new.format_type == 3 or new.chunk_handle == chunk_meta.chunk_handle and new.replica_port == chunk_meta.replica_port:
+					print(f"ERROR: Chunk {chunkID} for {filepath} could not be found on replicas!")
+					return b""
+				
+				chunk_meta = new
+				replica_addr = (LOCAL_HOST, chunk_meta.replica_port)
+				
+				# Recreate the socket and try again
+				client_socket.close()
+				client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+				status = client_socket.connect_ex(replica_addr)
 
 			# Perform a read chunk request
 			req = ChunkServRequest(format_type=0, req_type=0, chunk_handle=chunk_meta.chunk_handle, data=b"")
 			client_socket.sendall(req.to_bytes())
 
 			# Get back reply with the read data
-			reply = recvStruct(client_socket, 0)
+			reply = recvStruct(client_socket)
+
+			# If StatusReply received, something went wrong so update chunk meta and try again
+			if reply.format_type == 3:
+				self.updateChunkMeta(filepath, chunkID)
+				new = self.getChunkMeta(filepath, chunkID)
+
+				# If nothing actually updated or StatusReply received, return b"" and print that chunk could not be found
+				if new.format_type == 3 or new.chunk_handle == chunk_meta.chunk_handle and new.replica_port == chunk_meta.replica_port:
+					print(f"ERROR: Chunk {chunkID} for {filepath} could not be found on replicas!")
+					return b""
+
+				# Otherwise, try again
+				return self.readChunk(filepath, chunkID)
 
 			return reply.data
 
@@ -129,7 +178,7 @@ class Client:
 
 		# Read first chunk
 		data = self.readChunk(filepath, chunkID)[chunk_offset:]
-		if size != -1 and size <= self.chunk_size - chunk_offset:
+		if self.chunk_size - chunk_offset > len(data) or size != -1 and size <= self.chunk_size - chunk_offset:
 			# If size already satisfied, return data
 			return data[:size]
 		
@@ -151,18 +200,54 @@ class Client:
 	def writeChunk(self, filepath, chunkID, data):
 		# Get chunk metadata and replica address
 		chunk_meta = self.getChunkMeta(filepath, chunkID)
+
+		# If a StatusReply was received, chunk could not be written to, so return 0 (failed)
+		if chunk_meta.format_type == 3:
+			return 0
+
 		replica_addr = (LOCAL_HOST, chunk_meta.replica_port)
 
 		# Connect to the replica
 		with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-			client_socket.connect(replica_addr)
+			status = client_socket.connect_ex(replica_addr)
+
+			# If connection failed, chunk metadata needs to be updated
+			while status != 0:
+				self.updateChunkMeta(filepath, chunkID)
+				new = self.getChunkMeta(filepath, chunkID)
+
+				# If nothing actually updated or StatusReply was received, return 0 and print that chunk could not be found
+				if new.format_type == 3 or new.chunk_handle == chunk_meta.chunk_handle and new.replica_port == chunk_meta.replica_port:
+					print(f"ERROR: Chunk {chunkID} for {filepath} could not be found on replicas!")
+					return 0
+				
+				chunk_meta = new
+				replica_addr = (LOCAL_HOST, chunk_meta.replica_port)
+
+				# Recreate the socket and try again
+				client_socket.close()
+				client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+				status = client_socket.connect_ex(replica_addr)
 
 			# Perform a write chunk request
 			req = ChunkServRequest(format_type=0, req_type=1, chunk_handle=chunk_meta.chunk_handle, data=data)
 			client_socket.sendall(req.to_bytes())
 
 			# Return the reply status code
-			reply = recvStruct(client_socket, 3)
+			reply = recvStruct(client_socket)
+
+			# If StatusReply received, could be outdated meta, so update chunk meta and try again
+			if reply.format_type == 3:
+				self.updateChunkMeta(filepath, chunkID)
+				new = self.getChunkMeta(filepath, chunkID)
+
+				# If nothing actually updated or StatusReply received, return reply.status. Something else went wrong
+				if new.format_type == 3 or new.chunk_handle == chunk_meta.chunk_handle and new.replica_port == chunk_meta.replica_port:
+					return reply.status
+
+				# Otherwise, try again
+				return self.writeChunk(filepath, chunkID, data)
+			
 			return reply.status
 
 	# Write everything to the file
@@ -173,11 +258,11 @@ class Client:
 			status = self.writeChunk(filepath, chunkID, chunk_data)
 
 			# If something went wrong, return the error code and the chunk
-			if status != 0:
+			if status != 1:
 				return (status, chunkID)
 		
-		# Otherwise, (0, 0) indicates success
-		return (0, 0)
+		# Otherwise, (1, 0) indicates success
+		return (1, 0)
 
 	# Parse and perform a command. Returns true if exit
 	def performCmd(self, cmd):
@@ -194,6 +279,11 @@ class Client:
 				print("Exited")
 				return True
 			case "create" | "c":
+				# If not enough arguments, return
+				if len(cmd) < 2:
+					print("Usage: create <filepath> [chunks]")
+					return
+
 				# Chunks is 1 by default
 				chunks = 1
 				try:
@@ -206,8 +296,10 @@ class Client:
 				
 				status = self.createFile(cmd[1], chunks)
 
-				if status != 0:
-					print(f"ERROR: File creation failed with a status of {status}")
+				if status != 1:
+					print(f"ERROR: File creation failed. File may have already been created.")
+				else:
+					print(f"{cmd[1]} was successfully created with {chunks} chunks")
 			case "delete" | "d":
 				print("Delete in progress lmao")
 			case "open" | "o":
@@ -215,26 +307,33 @@ class Client:
 			case "close":
 				print("Close in progress lmao")
 			case "read" | "r":
-				print("Read still experimental...")
 				# Argument parser specifically for read
-				parser = argparse.ArgumentParser()
+				parser = argparse.ArgumentParser(exit_on_error=False)
 				parser.add_argument('filename')
-				parser.add_argument('chunk_num', type=int)
 				parser.add_argument('dst', nargs="?")
 				parser.add_argument('-o', type=int)
 				parser.add_argument('-s', type=int)
 
 				# Parse the command
-				args = parser.parse_args(cmd[1:])
+				args = noExitParseArgs(parser, cmd[1:])
+
+				# If invalid parse, don't proceed
+				if args is None:
+					print("Usage: read [-o OFF] [-s SIZE] <filepath> [dst]")
+					return
+
 				off = args.o or 0
-				size = args.s if args.s is not None else self.chunk_size
+				size = args.s if args.s is not None else -1
 				
 				# Read file
-				data = self.readChunk(args.filename, args.chunk_num)
-				data = data[off:off + size]
+				data = self.readFile(args.filename, off, size)
+				
+				# OLD: Read by chunk. Comment readFile and uncomment this if readFile is breaking stuff
+				# data = self.readChunk(args.filename, args.chunk_num)
+				# data = data[off:off + size]
 
 				# Turn data to actual text
-				text = data.decode()
+				text = data.decode().rstrip('\x00')
 
 				# Output to file if specified
 				if args.dst:
@@ -243,15 +342,21 @@ class Client:
 				else:
 					print(text)
 			case "write" | "w":
-				print("Write in progress lmao")
+				if len(cmd) < 2:
+					print("Usage: write <filepath>")
+					return
+
 				print("Write file contents here. EOF (CTRL+D) to end.")
 
 				# Read input
 				input_str = sys.stdin.read()
 
+				# Print for a new line after input
+				print()
+
 				status, chunkID = self.writeFile(cmd[1], input_str.encode())
-				if status != 0:
-					print(f"ERROR: Chunk {chunkID} returned a status of {status} when being written to. Aborting...")
+				if status != 1:
+					print(f"ERROR: Chunk {chunkID} could not be written to. File may not be big enough or might not exist at all.")
 				else:
 					print("Write successful")
 			case "snapshot" | "s":
