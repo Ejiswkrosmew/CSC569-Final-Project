@@ -16,43 +16,54 @@ Enter commands to perform operations such as read, write, create, delete, etc.
 
 **Commands can also be performed by doing python client.py <command> [command args]
 
-Command List:
-    h                                                      Alias for help
-    help                                                   Shows this help text.
- 
-    c                                                      Alias for create
-    create <filepath> [chunks]                             Create a new file at filepath.
-                                                           If chunks is specified, file will have
-                                                           that many chunks (default 1).
- 
-    d                                                      Alias for delete
-    delete <filepath>                                      Delete a file at filepath.
+Command List:"""
 
-    o                                                      Alias for open
-    open <filepath>                                        Open a file at filepath to be ready to operate on
+command_helps = {
+	"h": ["", "Alias for help."],
+	"help": ["", "Shows this help text."],
+	"c": ["", "Alias for create."],
+	"create": ["<filepath> [chunks]", "Create a new file at filepath.", "If chunks is specified, file will have", "that many chunks (default 1)."],
+	# "d": ["", "Alias for delete."],
+	# "delete": ["<filepath>", "Delete a file at filepath."],
+	"o": ["", "Alias for open."],
+	"open": ["<filepath>", "Open a file at filepath to be ready to operate on."],
+	"cl": ["", "Alias for close."],
+	"close": ["<filepath>", "Close a file at filepath (free cached metadata)."],
+	"r": ["", "Alias for read."],
+	"read": ["[-o OFFSET] [-s SIZE] <filepath> [dst]", "Read a file at filepath.", "If dst is specified, ouputs to dst instead of stdout.", "If -o is specified, read from offset.", "If -s is specified, read at most s bytes."],
+	"w": ["", "Alias for write."],
+	"write": ["<filepath>", "Write data to a file at filepath."],
+	# "s": ["", "Alias for snapshot."],
+	# "snapshot": ["<original> <new>", "Create a copy of the original file/directory", "without copying the data (i.e. copy-on-write)."],
+	# "a": ["", "Alias for append."],
+	# "append": ["<filepath> <offset>", "Record append operation to append data to a file", "at the specified offset."],
+	"q": ["", "Alias for quit."],
+	"quit": ["", "Exit cleanly."],
+}
 
-    close <filepath>                                       Close a file at filepath (free cached metadata)
+# Generate the command list help text
+command_text = "\n"
+max_args_len = 0
+for k in command_helps:
+	v = command_helps[k]
+	max_args_len = max(max_args_len, len(k + v[0]) + 1)
 
-    r                                                      Alias for read
-    read [-o OFF] [-s SIZE] <filepath> [dst]               Read a file at filepath
-                                                           If dst is specified, ouputs to dst instead of stdout.
-                                                           If -o is specified, read from offset
-                                                           If -s is specified, read at most s bytes
- 
-    w                                                      Alias for write
-    write <filepath>                                       Write data to a file at filepath.
+for k in command_helps:
+	command_text += "\n"
+	v = command_helps[k]
+	if len(v) < 1:
+		command_text += k + " " + v[0] + "\n"
+		continue
 
-    s                                                      Alias for snapshot
-    snapshot <original> <new>                              Create a copy of the original file/directory
-                                                           without copying the data (i.e. copy-on-write)
+	command_text += (k + " " + v[0]).ljust(max_args_len + 2) + v[1] + "\n"
+	for i in range(2, len(v)):
+		command_text += " " * (max_args_len + 2) + v[i] + "\n"
 
-    a
-    append <filepath> <data> <offset>                      Record append operation to append data to a file
-                                                           at the specified offset.
+# Append it to help_text
+help_text += command_text
 
-    q                                                      Alias for quit
-    quit                                                   Exit cleanly
-"""
+def printUsage(command):
+	print(f"usage: {command} {command_helps[command][0]}")
 
 def recvStruct(socket):
 	data = socket.recv(4)
@@ -281,7 +292,7 @@ class Client:
 			case "create" | "c":
 				# If not enough arguments, return
 				if len(cmd) < 2:
-					print("Usage: create <filepath> [chunks]")
+					printUsage("create")
 					return
 
 				# Chunks is 1 by default
@@ -300,16 +311,35 @@ class Client:
 					print(f"ERROR: File creation failed. File may have already been created.")
 				else:
 					print(f"{cmd[1]} was successfully created with {chunks} chunks")
-			case "delete" | "d":
-				print("Delete in progress lmao")
+			# case "delete" | "d":
+			# 	print("Delete in progress lmao")
 			case "open" | "o":
-				print("Open in progress lmao")
+				if len(cmd) < 2:
+					printUsage("open")
+					return
+
+				chunkID = 0
+				reply = self.updateChunkMeta(cmd[1], chunkID)
+				while reply.format_type != 3:
+					chunkID += 1
+					reply = self.updateChunkMeta(cmd[1], chunkID)
+				
+				print(f"Cached {chunkID} chunks for file {cmd[1]}")
 			case "close":
-				print("Close in progress lmao")
+				if len(cmd) < 2:
+					printUsage("close")
+					return
+				
+				chunkID = 0
+				while (cmd[1], chunkID) in self.meta_cache:
+					self.meta_cache.pop((cmd[1], chunkID))
+					chunkID += 1
+
+				print(f"Removed {chunkID} chunks for file {cmd[1]} from the cache")
 			case "read" | "r":
 				# Argument parser specifically for read
 				parser = argparse.ArgumentParser(exit_on_error=False)
-				parser.add_argument('filename')
+				parser.add_argument('filepath')
 				parser.add_argument('dst', nargs="?")
 				parser.add_argument('-o', type=int)
 				parser.add_argument('-s', type=int)
@@ -319,17 +349,17 @@ class Client:
 
 				# If invalid parse, don't proceed
 				if args is None:
-					print("Usage: read [-o OFF] [-s SIZE] <filepath> [dst]")
+					printUsage("read")
 					return
 
 				off = args.o or 0
 				size = args.s if args.s is not None else -1
 				
 				# Read file
-				data = self.readFile(args.filename, off, size)
+				data = self.readFile(args.filepath, off, size)
 				
 				# OLD: Read by chunk. Comment readFile and uncomment this if readFile is breaking stuff
-				# data = self.readChunk(args.filename, args.chunk_num)
+				# data = self.readChunk(args.filepath, args.chunk_num)
 				# data = data[off:off + size]
 
 				# Turn data to actual text
@@ -343,7 +373,7 @@ class Client:
 					print(text)
 			case "write" | "w":
 				if len(cmd) < 2:
-					print("Usage: write <filepath>")
+					printUsage("write")
 					return
 
 				print("Write file contents here. EOF (CTRL+D) to end.")
@@ -359,10 +389,10 @@ class Client:
 					print(f"ERROR: Chunk {chunkID} could not be written to. File may not be big enough or might not exist at all.")
 				else:
 					print("Write successful")
-			case "snapshot" | "s":
-				print("Snapshot in progress lmao")
-			case "append" | "a":
-				print("Record append in progress lmao")
+			# case "snapshot" | "s":
+			# 	print("Snapshot in progress lmao")
+			# case "append" | "a":
+			# 	print("Record append in progress lmao")
 			case _:
 				print("Invalid operation! Type \"help\" or \"h\" for a list of valid operations.")
 
@@ -381,7 +411,7 @@ def main():
 		# Prompt for operation
 		try:
 			# Using shlex.split to mimic actual shell argv behavior
-			cmd = shlex.split(input("Command:"))
+			cmd = shlex.split(input("Command: "))
 		except EOFError:
 			print("\nEOF encountered. Terminating client session...")
 			return
