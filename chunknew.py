@@ -37,7 +37,7 @@ def recv_decode(sock):
     header = recv_exact(sock, 4)
     format_type = struct.unpack("!I", header)[0]
     total_size = struct.calcsize(formats[format_type])
-    rest = recv_exact(soct, total_size - 4)
+    rest = recv_exact(sock, total_size - 4)
     return from_bytes(header + rest)
 
 
