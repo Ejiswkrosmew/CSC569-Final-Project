@@ -11,7 +11,6 @@ themselves with the master and continue sending heartbeat messages
 """
 
 
-
 from __future__ import annotations
 
 import subprocess
@@ -47,6 +46,7 @@ ChunkServerId = str
 CHUNKSERVER_CREATE_CHUNK = 1
 STATUS_OK = 1
 STATUS_ERROR = 0
+
 
 class NodeType(str, Enum):
     FILE = "file"
@@ -610,7 +610,14 @@ class MasterService:
             return self.handle_create_request(message)
 
         if isinstance(message, ChunkLocRequest):
-            return self.handle_client_lookup(message)
+            try:
+                return self.handle_client_lookup(message)
+            except (FileNotFoundError, IsADirectoryError, IndexError, LookupError) as exc:
+                self.store.append_log(
+                    event_type="chunk_lookup_failed",
+                    detail=str(exc),
+                )
+                return StatusReply(status=STATUS_ERROR)
 
         raise ValueError(f"unsupported message type: {type(message).__name__}")
 
