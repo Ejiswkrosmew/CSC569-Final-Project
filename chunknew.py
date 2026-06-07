@@ -254,6 +254,7 @@ def main():
         try:
             with open(f"chunkdump-{PORT}", "r") as f:
                 chunk_store = json.load(f)
+                Path(f"chunkdump-{PORT}").unlink()
         except FileNotFoundError:
             pass
 
