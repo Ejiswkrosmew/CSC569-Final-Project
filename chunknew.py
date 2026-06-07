@@ -223,8 +223,6 @@ def replica_list_hb(comm, chunks):
             
             if time.time() - start > timeout:
                 print("rank zero has gone down")
-                #TODO:
-                #write entire chunkstore to file <chunkdump-<portnumber>>
                 filepath = Path(f"chunkdump-{PORT}")
 
                 filepath.unlink(missing_ok=True)
@@ -240,7 +238,7 @@ def replica_list_hb(comm, chunks):
             time.sleep(0.01)
 
 
-def main(): #TODO: arg order: chunkserverport#, masterport#, chunkdumpfilepath  
+def main():  
     comm = MPI.COMM_WORLD
     #print(f"Hello from rank {comm.Get_rank()} of {comm.Get_size()}")
     rank = comm.Get_rank()
@@ -252,10 +250,13 @@ def main(): #TODO: arg order: chunkserverport#, masterport#, chunkdumpfilepath
     if rank == 0:
         print(f"I am master")
         
-        #TODO:
-        #read from chunkdump file on disk (./chunkdump-<portnumber>)
-        #place into chunkstore
-        #destory file
+        #load dump file if it exists
+        try:
+            with open(f"chunkdump-{PORT}", "r") as f:
+                chunk_store = json.load(f)
+        except FileNotFoundError:
+            pass
+
 
         #connect to master
         master_sock = socket.socket(
